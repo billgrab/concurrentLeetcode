@@ -15,6 +15,15 @@ type TrieNode struct {
 	word string
 }
 
+type workItem struct {
+	r int
+	c int
+}
+
+const (
+	numWorkers = 16
+)
+
 // findWords is the required method for https://leetcode.com/problems/word-search-ii/
 // 
 func findWords(board [][]byte, words []string) []string {
@@ -42,6 +51,40 @@ func findWords(board [][]byte, words []string) []string {
 	*/
 	result, _ = FindWordsInParallel(board, words)
 	return result
+
+	/*
+	Even with the update of using a fixed pool of worker, for the 12x12 big-data-set case, submission on leetcode.com still got TimeLimitExceeded.
+	Seems like the highest % of completion is around (~80, ~120) out of the total 12x12 items. 
+	Of course, stats varies depends on: 
+		1/.test cases exection order, and
+		2/.the traffic load on leetcode.com.
+	
+	Here are some of the captured  stdout from leetcode.com portal during repeated submissions:
+	
+	(numWorkers = 16)
+		...
+		[worker:11]	Done 123: 	(r=9, c=4)
+		[worker:10]	Done 124: 	(r=9, c=9)
+		[worker:4]	Done 125: 	(r=10, c=10)
+	(numWorkers = 8)
+		...
+		[worker:6]	Done 86: 	(r=7, c=1)
+		[worker:7]	Done 87: 	(r=7, c=3)
+		[worker:3]	Done 88: 	(r=7, c=2)
+	*/
+
+	/* Well, finally got a pass! with numWorkers = 8
+		[02/20/2022 16:18] 62 / 62 test cases passed.
+		Status: Accepted
+		Runtime: 2408 ms
+		Memory Usage: 8.2 MB
+
+	And another one with numWorkers = 16
+		[02/20/2022 16:24] 62 / 62 test cases passed.
+		Status: Accepted
+		Runtime: 2376 ms
+		Memory Usage: 8.3 MB
+	*/
 }
 
 // FindWordsInParallel ...
@@ -64,24 +107,37 @@ func FindWordsInParallel(board [][]byte, words []string) (strs []string, lapse t
 		lapse = time.Since(t0)
 	}()
 
+	dispatcherBuf := rows*cols
+	workDispatcher := make(chan *workItem, dispatcherBuf)
+
 	bigBuf := rows*cols // might need to set higher
 	var result chan string = make(chan string, bigBuf)
 	var wg sync.WaitGroup
 	var explored int64
-	for i := 0; i < rows; i++ {
-		for j := 0; j < cols; j++ {
-			wg.Add(1)
-			go func(r, c int) {
-				defer func() {
-					atomic.AddInt64(&explored, 1)
-					// fmt.Printf("Done %d: (r=%d, c=%d)\n", atomic.LoadInt64(&explored), r, c)
-					wg.Done()
-				}()
-				used := createEmpty(rows, cols)
-				explore(ctx, board, r, c, root, used, result)
-			}(i, j)
+
+	work := func(items <-chan *workItem, id int) {
+		fmt.Printf("[worker:%d] started\n", id)
+		defer wg.Done()
+
+		for item := range items {
+			used := createEmpty(rows, cols)
+			explore(ctx, board, item.r, item.c, root, used, result)
+
+			atomic.AddInt64(&explored, 1)
+			fmt.Printf("[worker:%d]\tDone %d: \t(r=%d, c=%d)\n", id, atomic.LoadInt64(&explored), item.r, item.c)
 		}
 	}
+	for i:=0; i<numWorkers; i++ {
+		wg.Add(1)
+		go work(workDispatcher, i)
+	}
+
+	for i := 0; i < rows; i++ {
+		for j := 0; j < cols; j++ {
+			workDispatcher <- &workItem{i, j}
+		}
+	}
+	close(workDispatcher)
 	
 	agrDone := make(chan interface{})
 	go func() {
